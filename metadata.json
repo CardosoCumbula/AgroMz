@@ -1,0 +1,10 @@
+{
+  "name": "AgroMoz",
+  "description": "Mercado Agrícola de Moçambique com pagamentos M-Pesa, autenticação OTP, acompanhamento de visitas por Supabase e acessibilidade total.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
