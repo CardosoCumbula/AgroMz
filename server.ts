@@ -2,45 +2,30 @@ import express from "express";
 import path from "path";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
-import { createClient } from "@supabase/supabase-js";
-import crypto from "crypto";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { MpesaClient } from "./mpesa-client";
 
 // Load environment variables
 dotenv.config();
 
-function encryptMpesaApiKey(apiKey: string, publicKeyPem: string | undefined): string {
-  if (!publicKeyPem || !apiKey) {
-    return apiKey || "";
-  }
-  try {
-    let pem = publicKeyPem.trim();
-    if (!pem.includes("-----BEGIN PUBLIC KEY-----")) {
-      const cleaned = pem.replace(/-----(BEGIN|END) PUBLIC KEY-----/g, "").replace(/\s+/g, "");
-      pem = `-----BEGIN PUBLIC KEY-----\n${cleaned.match(/.{1,64}/g)?.join("\n")}\n-----END PUBLIC KEY-----`;
-    }
-    
-    const buffer = Buffer.from(apiKey.trim());
-    const encrypted = crypto.publicEncrypt(
-      {
-        key: pem,
-        padding: crypto.constants.RSA_PKCS1_PADDING,
-      },
-      buffer
-    );
-    return encrypted.toString("base64");
-  } catch (err: any) {
-    console.error("[M-Pesa Encryption Error]", err?.message || err);
-    return apiKey;
-  }
-}
-
 const app = express();
-const PORT = 3000;
+const PORT = parseInt(process.env.PORT || "3000", 10);
 
 app.use(express.json());
 
-// Initialize Supabase client STRIKELY
+// CORS headers for development and production
+app.use((req, res, next) => {
+  const origin = req.headers.origin || process.env.APP_URL || "http://localhost:3000";
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+  next();
+});
+
+// Initialize Supabase client
 const supabaseUrl = process.env.VITE_SUPABASE_URL || "";
 const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY || "";
 
@@ -48,19 +33,19 @@ const isValidSupabaseUrl = (url: string) => {
   return typeof url === "string" && (url.startsWith("http://") || url.startsWith("https://"));
 };
 
-let supabase: any = null;
+let supabase: SupabaseClient | null = null;
 
-if (!supabaseUrl || !supabaseAnonKey || !isValidSupabaseUrl(supabaseUrl)) {
-  console.error("CRITICAL ERROR: Supabase credentials missing or invalid. Application cannot run in production without a valid database connection.");
-  process.exit(1);
-} else {
+if (supabaseUrl && supabaseAnonKey && isValidSupabaseUrl(supabaseUrl)) {
   try {
     supabase = createClient(supabaseUrl, supabaseAnonKey);
     console.log("Supabase client initialized successfully.");
   } catch (err: any) {
-    console.error("CRITICAL ERROR: Failed to initialize Supabase client:", err?.message || err);
-    process.exit(1);
+    console.error("Warning: Failed to initialize Supabase client:", err?.message || err);
+    console.log("Running without database - some features will be unavailable.");
   }
+} else {
+  console.warn("Warning: Supabase credentials missing or invalid. Running without database.");
+  console.log("Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in .env to enable database features.");
 }
 
 // ----------------- API ROUTES -----------------
@@ -68,7 +53,7 @@ if (!supabaseUrl || !supabaseAnonKey || !isValidSupabaseUrl(supabaseUrl)) {
 app.get("/api/sys/status", (req, res) => {
   res.json({
     status: "online",
-    supabaseConnected: true,
+    supabaseConnected: !!supabase,
     env: {
       hasMpesaKey: !!process.env.MPESA_API_KEY,
       hasResendKey: !!process.env.RESEND_API_KEY,
@@ -92,6 +77,9 @@ app.post("/api/visitor", async (req, res) => {
   };
 
   try {
+    if (!supabase) {
+      return res.json({ success: true, logged: visitorData, offline: true });
+    }
     const { error } = await supabase.from("visitors").insert([visitorData]);
     if (error) throw error;
     return res.json({ success: true, logged: visitorData });
@@ -118,7 +106,9 @@ app.post("/api/contact", async (req, res) => {
   };
 
   try {
-    await supabase.from("contacts").insert([contactData]);
+    if (supabase) {
+      await supabase.from("contacts").insert([contactData]);
+    }
     
     // Deliver confirmation email that message was received
     await fetch("https://api.resend.com/emails", {
@@ -158,28 +148,62 @@ app.post("/api/mpesa/pay", async (req, res) => {
     return res.status(400).json({ error: "Estão em falta parâmetros cruciais para o pagamento por M-Pesa." });
   }
 
-  console.log(`Iniciando cobrança M-Pesa no valor de ${amount} para o número ${phone} (Ref: ${orderId || "Geral"})`);
-
-  const result = await mpesaClient.initiatePayment(phone, amount, orderId || "ORD-000");
-
-  if (!result.success) {
+  // Validate phone number format for Mozambique
+  const cleanPhone = phone.replace(/[\s\-\+]/g, "");
+  const msisdnMatch = cleanPhone.match(/^(258)?(84|85|82|83|86|87)\d{7,8}$/);
+  if (!msisdnMatch) {
     return res.status(400).json({
-      success: false,
-      message: result.message
+      error: "Número móvel inválido de Moçambique. Deve introduzir um número válido (ex: 84 ou 85 seguido de 7-8 dígitos)."
     });
   }
 
-  return res.json({
-    success: true,
-    transactionReference: result.transactionReference,
-    provider: result.provider,
-    message: result.message
-  });
+  const numericAmount = parseFloat(amount);
+  if (isNaN(numericAmount) || numericAmount <= 0) {
+    return res.status(400).json({ error: "Valor de pagamento inválido." });
+  }
+
+  console.log(`Iniciando cobrança M-Pesa no valor de ${numericAmount} MZN para o número ${cleanPhone} (Ref: ${orderId || "Geral"})`);
+
+  try {
+    const result = await mpesaClient.initiatePayment(cleanPhone, numericAmount.toString(), orderId || "ORD-000");
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        message: result.message
+      });
+    }
+
+    return res.json({
+      success: true,
+      transactionReference: result.transactionReference,
+      provider: result.provider,
+      message: result.message,
+      simulated: process.env.MPESA_ENVIRONMENT !== "production"
+    });
+  } catch (err: any) {
+    console.error("M-Pesa Payment Error:", err);
+    return res.status(500).json({
+      success: false,
+      message: err?.message || "Erro interno ao processar pagamento M-Pesa."
+    });
+  }
 });
 
 app.post("/api/mpesa-callback", (req, res) => {
   const callbackData = req.body;
-  console.log("Notificação de Callback Recebida", callbackData);
+  console.log("Notificação de Callback Recebida", JSON.stringify(callbackData, null, 2));
+  
+  // Process the callback - update order status if possible
+  const transactionId = callbackData?.Body?.stkCallback?.CheckoutRequestID || 
+                        callbackData?.output_TransactionID || 
+                        callbackData?.transactionReference;
+  
+  if (transactionId) {
+    console.log(`Processando callback para transacção: ${transactionId}`);
+    // In production, update the order status in the database here
+  }
+  
   return res.status(200).json({
     ResultCode: 0,
     ResultDesc: "Callback recebido e processado no AgroMoz Engine com sucesso."
@@ -190,10 +214,27 @@ app.get("/api/mpesa/query", async (req, res) => {
   const { checkoutRequestId, orderId, reference } = req.query;
 
   try {
-    if (mpesaClient.getProvider() === "safaricom_ke") {
+    let provider: "vodacom_moz" | "safaricom_ke";
+    try {
+      provider = mpesaClient.getProvider();
+    } catch {
+      return res.status(400).json({ 
+        success: false, 
+        status: "failed",
+        message: "M-Pesa não configurado. Configure as credenciais da API no ambiente." 
+      });
+    }
+
+    if (provider === "safaricom_ke") {
+      if (!checkoutRequestId) {
+        return res.status(400).json({ success: false, message: "checkoutRequestId é obrigatório para Safaricom." });
+      }
       const query = await mpesaClient.querySafaricomTransaction(checkoutRequestId as string);
       return res.json(query);
-    } else if (mpesaClient.getProvider() === "vodacom_moz") {
+    } else if (provider === "vodacom_moz") {
+      if (!orderId || !reference) {
+        return res.status(400).json({ success: false, message: "orderId e reference são obrigatórios para Vodacom." });
+      }
       const query = await mpesaClient.queryVodacomTransaction(orderId as string, reference as string);
       return res.json(query);
     } else {
@@ -272,8 +313,12 @@ app.post("/api/checkout", async (req, res) => {
   };
 
   try {
-    const { error } = await supabase.from("orders").insert([newOrder]);
-    if (error) throw error;
+    if (supabase) {
+      const { error } = await supabase.from("orders").insert([newOrder]);
+      if (error) throw error;
+    } else {
+      console.log("Offline mode: Order not saved to database", orderId);
+    }
 
     if (process.env.RESEND_API_KEY && email) {
       await fetch("https://api.resend.com/emails", {
@@ -294,6 +339,7 @@ app.post("/api/checkout", async (req, res) => {
     return res.json({
       success: true,
       orderId,
+      order: newOrder,
       message: "Encomenda processada com sucesso. Notificação remetida."
     });
   } catch (err: any) {

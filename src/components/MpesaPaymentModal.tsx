@@ -51,7 +51,7 @@ export default function MpesaPaymentModal({ onClose, onPaymentSuccess, cartItems
       if (checkoutRes.ok) {
         setStatus("success");
         setTimeout(() => {
-          onPaymentSuccess(checkoutData.orderId, checkoutData.order);
+          onPaymentSuccess(checkoutData.orderId, checkoutData.order || {});
         }, 2000);
       } else {
         setErrorMessage(checkoutData.error || "Erro ao registar a encomenda paga.");
@@ -75,9 +75,9 @@ export default function MpesaPaymentModal({ onClose, onPaymentSuccess, cartItems
 
     // Mozambique format checks (Starts with 258 or simply any valid prefix like 84, 85, 82, 86, 87)
     const cleanPhone = phone.replace(/[\s\-\+]/g, "");
-    const msisdnMatch = cleanPhone.match(/^(258)?(84|85|82|83|86|87)\d{7}$/);
+    const msisdnMatch = cleanPhone.match(/^(258)?(84|85|82|83|86|87)\d{7,8}$/);
     if (!msisdnMatch) {
-      setErrorMessage("Número móvel inválido de Moçambique. Deve introduzir um número válido (ex: 84 ou 85 seguido de 7 dígitos).");
+      setErrorMessage("Número móvel inválido de Moçambique. Deve introduzir um número válido (ex: 84 ou 85 seguido de 7-8 dígitos).");
       setStatus("error");
       return;
     }
@@ -91,11 +91,11 @@ export default function MpesaPaymentModal({ onClose, onPaymentSuccess, cartItems
       setActiveOrderId(orderId);
       setActiveCleanPhone(cleanPhone);
       
-      // Request Payment Push
+      // Request Payment Push - send the cleaned phone number
       const payRes = await fetch("/api/mpesa/pay", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone, amount: total, orderId })
+        body: JSON.stringify({ phone: cleanPhone, amount: total, orderId })
       });
 
       let payData: any = {};
@@ -105,19 +105,20 @@ export default function MpesaPaymentModal({ onClose, onPaymentSuccess, cartItems
       }
 
       if (!payRes.ok) {
-        setErrorMessage(payData.error || "Ocorreu uma falha ao comunicar com os canais da Vodacom.");
+        setErrorMessage(payData.error || payData.message || "Ocorreu uma falha ao comunicar com os canais da Vodacom.");
         setStatus("error");
         return;
       }
 
       setTransactionRef(payData.transactionReference);
-      setSimulated(payData.simulated);
+      setSimulated(payData.simulated !== false);
       setStatus("pin_pending");
 
       // Set up background fallback timer to auto-confirm if the user doesn't interact
+      // 30 seconds gives the user enough time to enter their PIN
       const tId = setTimeout(() => {
         confirmCheckoutOrder(orderId, cleanPhone);
-      }, 5000);
+      }, 30000);
       setActiveTimeoutId(tId);
 
     } catch (err) {
