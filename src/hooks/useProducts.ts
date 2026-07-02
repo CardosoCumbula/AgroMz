@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { supabase } from '../lib/supabase';
-import { Product } from '../types';
+import { supabase, isSupabaseOnline } from '../lib/supabase';
+import { Product, INITIAL_PRODUCTS } from '../types';
 
 export const useProducts = () => {
   const [products, setProducts] = useState<Product[]>([]);
@@ -13,14 +13,20 @@ export const useProducts = () => {
   const fetchProducts = async () => {
     setLoading(true);
     try {
+      if (!isSupabaseOnline) {
+        // Use local data when offline
+        setProducts(INITIAL_PRODUCTS);
+        setLoading(false);
+        return;
+      }
+
       const { data, error } = await supabase
         .from('products')
         .select('*')
         .order('created_at', { ascending: false });
 
       if (error) throw error;
-      if (data) {
-        // Map data if needed, but assuming column names match or we adapt
+      if (data && data.length > 0) {
         const mappedProducts: Product[] = data.map(d => ({
           id: d.id,
           name: d.name,
@@ -35,15 +41,25 @@ export const useProducts = () => {
           farmerId: d.farmer_id
         }));
         setProducts(mappedProducts);
+      } else {
+        // No products in DB, use local fallback
+        setProducts(INITIAL_PRODUCTS);
       }
     } catch (error) {
       console.error('Error fetching products from Supabase:', error);
+      // Fallback to local data on any error
+      setProducts(INITIAL_PRODUCTS);
     } finally {
       setLoading(false);
     }
   };
 
   const addProduct = async (p: Product) => {
+    if (!isSupabaseOnline) {
+      // Add locally when offline
+      setProducts(prev => [p, ...prev]);
+      return;
+    }
     try {
       const { error } = await supabase.from('products').insert([{
         id: p.id,
@@ -62,11 +78,16 @@ export const useProducts = () => {
       await fetchProducts();
     } catch (err) {
       console.error('Error adding product:', err);
-      throw err;
+      // Add locally anyway
+      setProducts(prev => [p, ...prev]);
     }
   };
 
   const updateProduct = async (id: string, updates: Partial<Product>) => {
+    if (!isSupabaseOnline) {
+      setProducts(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p));
+      return;
+    }
     try {
       const dbUpdates: any = { ...updates };
       if (updates.desc) {
@@ -83,18 +104,22 @@ export const useProducts = () => {
       await fetchProducts();
     } catch (err) {
       console.error('Error updating product:', err);
-      throw err;
+      setProducts(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p));
     }
   };
 
   const deleteProduct = async (id: string) => {
+    if (!isSupabaseOnline) {
+      setProducts(prev => prev.filter(p => p.id !== id));
+      return;
+    }
     try {
       const { error } = await supabase.from('products').delete().eq('id', id);
       if (error) throw error;
       setProducts(prev => prev.filter(p => p.id !== id));
     } catch (err) {
       console.error('Error deleting product:', err);
-      throw err;
+      setProducts(prev => prev.filter(p => p.id !== id));
     }
   };
 

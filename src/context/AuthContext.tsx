@@ -1,10 +1,9 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { Session, User } from '@supabase/supabase-js';
-import { supabase } from '../lib/supabase';
+import { supabase, isSupabaseOnline } from '../lib/supabase';
 import { User as AppUser } from '../types';
 
 interface AuthContextType {
-  session: Session | null;
+  session: any;
   user: AppUser | null;
   signOut: () => Promise<void>;
   loading: boolean;
@@ -20,12 +19,12 @@ const AuthContext = createContext<AuthContextType>({
 export const useAuth = () => useContext(AuthContext);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [session, setSession] = useState<Session | null>(null);
+  const [session, setSession] = useState<any>(null);
   const [user, setUser] = useState<AppUser | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    supabase.auth.getSession().then(({ data: { session } }: any) => {
       setSession(session);
       if (session?.user) {
         fetchProfile(session.user);
@@ -36,7 +35,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((_event: any, session: any) => {
       setSession(session);
       if (session?.user) {
         fetchProfile(session.user);
@@ -49,36 +48,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => subscription.unsubscribe();
   }, []);
 
-  const fetchProfile = async (authUser: User) => {
+  const fetchProfile = async (authUser: any) => {
     try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', authUser.id)
-        .single();
+      // Get user metadata (supports both real Supabase and offline mock)
+      const metadata = authUser.user_metadata || {};
+      const fullName = metadata.full_name || authUser.email?.split('@')[0] || 'User';
+      const role = (metadata.role as 'buyer' | 'farmer') || 'buyer';
 
-      if (error) throw error;
-
-      if (data) {
-        setUser({
-          id: data.id,
-          name: data.full_name,
-          email: authUser.email || '',
-          role: data.role as 'buyer' | 'farmer',
-          verified: true,
-        });
-      } else {
-        // Fallback user if profile doesn't exist yet
-        setUser({
-          id: authUser.id,
-          name: authUser.email?.split('@')[0] || 'User',
-          email: authUser.email || '',
-          role: 'buyer', // Default role
-          verified: true,
-        });
-      }
+      setUser({
+        id: authUser.id,
+        name: fullName,
+        email: authUser.email || '',
+        role: role,
+        verified: true,
+      });
     } catch (err) {
-      console.error('Error fetching profile:', err);
+      console.error('Error in fetchProfile:', err);
     } finally {
       setLoading(false);
     }
@@ -86,6 +71,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signOut = async () => {
     await supabase.auth.signOut();
+    setUser(null);
+    setSession(null);
   };
 
   return (

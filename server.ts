@@ -53,10 +53,11 @@ if (supabaseUrl && supabaseAnonKey && isValidSupabaseUrl(supabaseUrl)) {
 app.get("/api/sys/status", (req, res) => {
   res.json({
     status: "online",
-    supabaseConnected: !!supabase,
+    supabaseConnected: !!supabase && !!process.env.VITE_SUPABASE_URL && process.env.VITE_SUPABASE_URL.length > 10,
+    mpesaSimulated: mpesaClient.isSimulated(),
     env: {
-      hasMpesaKey: !!process.env.MPESA_API_KEY,
-      hasResendKey: !!process.env.RESEND_API_KEY,
+      hasMpesaKey: !!(process.env.MPESA_API_KEY && process.env.MPESA_API_KEY.length > 10),
+      hasResendKey: !!(process.env.RESEND_API_KEY && process.env.RESEND_API_KEY.length > 10),
       mpesaEnvironment: process.env.MPESA_ENVIRONMENT || "sandbox"
     }
   });
